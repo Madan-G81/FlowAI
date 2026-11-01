@@ -1,16 +1,18 @@
 import cv2
 import json
+import math
+from collections import defaultdict, deque
 from pathlib import Path
 from ultralytics import YOLO
 
-# --------------------------------
-# FLOWAI VEHICLE DETECTION SYSTEM
-# --------------------------------
+# ==========================================
+# FLOWAI - MULTI-DIRECTION TRAFFIC ANALYSIS
+# ==========================================
 
 BASE_DIR = Path(__file__).resolve().parent
 
 MODEL_PATH = BASE_DIR / "yolov8n.pt"
-VIDEO_PATH = BASE_DIR / "traffic.mp4"
+VIDEO_PATH = BASE_DIR / "traffic2.mp4"
 
 OUTPUT_DIR = BASE_DIR / "output"
 RESULT_DIR = BASE_DIR / "results"
@@ -18,10 +20,14 @@ RESULT_DIR = BASE_DIR / "results"
 OUTPUT_DIR.mkdir(exist_ok=True)
 RESULT_DIR.mkdir(exist_ok=True)
 
-OUTPUT_VIDEO = OUTPUT_DIR / "traffic_detected.mp4"
-OUTPUT_JSON = RESULT_DIR / "detections.json"
+OUTPUT_VIDEO = OUTPUT_DIR / "traffic2_detected.mp4"
+OUTPUT_JSON = RESULT_DIR / "traffic2_detections.json"
 
-# YOLO COCO vehicle class IDs
+
+# ==========================================
+# VEHICLE CLASSES
+# ==========================================
+
 VEHICLE_CLASSES = {
     1: "Bicycle",
     2: "Car",
@@ -30,35 +36,212 @@ VEHICLE_CLASSES = {
     7: "Truck"
 }
 
-# Initialize counts for every category
+
+# ==========================================
+# TRAFFIC SETTINGS
+# ==========================================
+
+LOW_LIMIT = 10
+MEDIUM_LIMIT = 25
+
+MIN_MOVEMENT = 12
+HISTORY_LENGTH = 12
+
+
+# ==========================================
+# FOUR APPROACH STREAMS
+# ==========================================
+
+STREAMS = [
+    "NORTH",
+    "SOUTH",
+    "EAST",
+    "WEST"
+]
+
+stream_vehicle_ids = {
+    stream: set()
+    for stream in STREAMS
+}
+
+DIRECTIONS = [
+    "N", "NE", "E", "SE",
+    "S", "SW", "W", "NW",
+    "UNKNOWN"
+]
+
+movement_vehicle_ids = {
+    direction: set()
+    for direction in DIRECTIONS
+}
+
+
+# ==========================================
+# TRACKING MEMORY
+# ==========================================
+
+track_history = defaultdict(
+    lambda: deque(maxlen=HISTORY_LENGTH)
+)
+
+track_stream = {}
+track_movement = {}
+
 vehicle_ids = {
     name: set()
     for name in VEHICLE_CLASSES.values()
 }
 
-# Load YOLO model
-print("Loading YOLO model...")
+
+# ==========================================
+# DENSITY CALCULATION
+# ==========================================
+
+def calculate_density(count):
+
+    if count <= LOW_LIMIT:
+        return "LOW"
+
+    elif count <= MEDIUM_LIMIT:
+        return "MEDIUM"
+
+    return "HIGH"
+
+
+# ==========================================
+# SIGNAL RECOMMENDATION
+# ==========================================
+
+def signal_suggestion(density, queue_count):
+
+    if density == "HIGH" or queue_count >= 15:
+        return "HIGH PRIORITY - More green time"
+
+    elif density == "MEDIUM" or queue_count >= 7:
+        return "MEDIUM PRIORITY - Moderate green time"
+
+    return "LOW PRIORITY - Normal green time"
+
+
+# ==========================================
+# APPROACH STREAM CLASSIFICATION
+# ==========================================
+
+def classify_stream(x, y, width, height):
+
+    center_x = width / 2
+    center_y = height / 2
+
+    dx = x - center_x
+    dy = y - center_y
+
+    if abs(dx) > abs(dy):
+
+        if dx < 0:
+            return "WEST"
+
+        return "EAST"
+
+    else:
+
+        if dy < 0:
+            return "NORTH"
+
+        return "SOUTH"
+
+
+# ==========================================
+# MOVEMENT DIRECTION CLASSIFICATION
+# ==========================================
+
+def classify_movement(points):
+
+    if len(points) < 2:
+        return "UNKNOWN"
+
+    start_x, start_y = points[0]
+    end_x, end_y = points[-1]
+
+    dx = end_x - start_x
+    dy = end_y - start_y
+
+    distance = math.sqrt(dx * dx + dy * dy)
+
+    if distance < MIN_MOVEMENT:
+        return "UNKNOWN"
+
+    angle = math.degrees(
+        math.atan2(-dy, dx)
+    )
+
+    angle = (angle + 360) % 360
+
+    directions = [
+        "E", "NE", "N", "NW",
+        "W", "SW", "S", "SE"
+    ]
+
+    index = int(
+        ((angle + 22.5) % 360) // 45
+    )
+
+    return directions[index]
+
+
+# ==========================================
+# LOAD YOLO MODEL
+# ==========================================
+
+print("\nLoading YOLO model...")
+
+if not MODEL_PATH.exists():
+
+    print("ERROR: yolov8n.pt not found!")
+    raise SystemExit
+
+if not VIDEO_PATH.exists():
+
+    print("ERROR: traffic2.mp4 not found!")
+    raise SystemExit
 
 model = YOLO(str(MODEL_PATH))
 
 print("YOLO model loaded successfully!")
 
-# Open traffic video
+
+# ==========================================
+# OPEN VIDEO
+# ==========================================
+
 cap = cv2.VideoCapture(str(VIDEO_PATH))
 
 if not cap.isOpened():
-    print("ERROR: Cannot open traffic.mp4")
+
+    print("ERROR: Cannot open traffic2.mp4")
     raise SystemExit
 
 fps = cap.get(cv2.CAP_PROP_FPS)
-width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+width = int(
+    cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+)
+
+height = int(
+    cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+)
+
+total_frames = int(
+    cap.get(cv2.CAP_PROP_FRAME_COUNT)
+)
 
 if fps <= 0:
     fps = 25
 
-# Create output video
+
+# ==========================================
+# VIDEO WRITER
+# ==========================================
+
 fourcc = cv2.VideoWriter_fourcc(*"mp4v")
 
 writer = cv2.VideoWriter(
@@ -69,200 +252,568 @@ writer = cv2.VideoWriter(
 )
 
 if not writer.isOpened():
+
     print("ERROR: Cannot create output video")
+
     cap.release()
     raise SystemExit
 
+
+# ==========================================
+# ANALYSIS VARIABLES
+# ==========================================
+
 all_detections = []
+
 frame_number = 0
 
-print("Starting FlowAI vehicle detection...")
+density_summary = {
+    "LOW": 0,
+    "MEDIUM": 0,
+    "HIGH": 0
+}
 
-# --------------------------------
-# PROCESS VIDEO FRAME BY FRAME
-# --------------------------------
+stream_density_summary = {
+    stream: {
+        "LOW": 0,
+        "MEDIUM": 0,
+        "HIGH": 0
+    }
+    for stream in STREAMS
+}
 
-while True:
 
-    ret, frame = cap.read()
+# ==========================================
+# START ANALYSIS
+# ==========================================
 
-    if not ret:
-        break
+print("\nStarting FlowAI Multi-Directional Analysis...")
 
-    frame_number += 1
 
-    results = model.track(
-        frame,
-        persist=True,
-        tracker="bytetrack.yaml",
-        classes=list(VEHICLE_CLASSES.keys()),
-        conf=0.30,
-        verbose=False
-    )
+# ==========================================
+# MAIN VIDEO PROCESSING LOOP
+# ==========================================
 
-    frame_detections = []
+try:
 
-    for result in results:
+    while True:
 
-        if result.boxes is None:
-            continue
+        ret, frame = cap.read()
 
-        for box in result.boxes:
+        if not ret:
+            break
 
-            class_id = int(box.cls[0])
-            confidence = float(box.conf[0])
+        frame_number += 1
 
-            vehicle_name = VEHICLE_CLASSES[class_id]
+        results = model.track(
+            frame,
+            persist=True,
+            tracker="bytetrack.yaml",
+            classes=list(VEHICLE_CLASSES.keys()),
+            conf=0.30,
+            verbose=False
+        )
 
-            x1, y1, x2, y2 = map(
-                int,
-                box.xyxy[0].tolist()
+        frame_detections = []
+
+        # Vehicle class counts
+        current_counts = {
+            name: 0
+            for name in VEHICLE_CLASSES.values()
+        }
+
+        # FIX: Include UNKNOWN to prevent KeyError
+        current_stream_counts = {
+            stream: 0
+            for stream in STREAMS
+        }
+
+        current_stream_counts["UNKNOWN"] = 0
+
+        # Movement counts
+        current_movement_counts = {
+            direction: 0
+            for direction in DIRECTIONS
+        }
+
+
+        # ==================================
+        # PROCESS DETECTED VEHICLES
+        # ==================================
+
+        for result in results:
+
+            if result.boxes is None:
+                continue
+
+            for box in result.boxes:
+
+                class_id = int(box.cls[0])
+
+                if class_id not in VEHICLE_CLASSES:
+                    continue
+
+                confidence = float(box.conf[0])
+
+                x1, y1, x2, y2 = map(
+                    int,
+                    box.xyxy[0].tolist()
+                )
+
+                track_id = None
+
+                if box.id is not None:
+                    track_id = int(box.id[0])
+
+                vehicle_name = VEHICLE_CLASSES[class_id]
+
+                current_counts[vehicle_name] += 1
+
+                center_x = int((x1 + x2) / 2)
+                center_y = int((y1 + y2) / 2)
+
+                stream = "UNKNOWN"
+                movement = "UNKNOWN"
+
+
+                # ==================================
+                # TRACK VEHICLE POSITIONS
+                # ==================================
+
+                if track_id is not None:
+
+                    vehicle_ids[vehicle_name].add(track_id)
+
+                    track_history[track_id].append(
+                        (center_x, center_y)
+                    )
+
+                    points = list(
+                        track_history[track_id]
+                    )
+
+
+                    # ==================================
+                    # IDENTIFY APPROACH STREAM
+                    # ==================================
+
+                    if track_id not in track_stream:
+
+                        track_stream[track_id] = (
+                            classify_stream(
+                                center_x,
+                                center_y,
+                                width,
+                                height
+                            )
+                        )
+
+                    stream = track_stream[track_id]
+
+                    # Safety check
+                    if stream in stream_vehicle_ids:
+
+                        stream_vehicle_ids[stream].add(
+                            track_id
+                        )
+
+
+                    # ==================================
+                    # IDENTIFY MOVEMENT DIRECTION
+                    # ==================================
+
+                    movement = classify_movement(points)
+
+                    if movement != "UNKNOWN":
+
+                        track_movement[track_id] = movement
+
+                    else:
+
+                        movement = track_movement.get(
+                            track_id,
+                            "UNKNOWN"
+                        )
+
+                    movement_vehicle_ids[movement].add(
+                        track_id
+                    )
+
+
+                # ==================================
+                # UPDATE STREAM AND MOVEMENT COUNTS
+                # ==================================
+
+                if stream not in current_stream_counts:
+
+                    current_stream_counts[stream] = 0
+
+                current_stream_counts[stream] += 1
+
+                current_movement_counts[movement] += 1
+
+
+                # ==================================
+                # DRAW VEHICLE BOUNDING BOX
+                # ==================================
+
+                cv2.rectangle(
+                    frame,
+                    (x1, y1),
+                    (x2, y2),
+                    (0, 255, 0),
+                    2
+                )
+
+                label = (
+                    f"{vehicle_name} "
+                    f"ID:{track_id} "
+                    f"{stream} "
+                    f"{movement}"
+                )
+
+                cv2.putText(
+                    frame,
+                    label,
+                    (x1, max(y1 - 10, 20)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    (0, 255, 0),
+                    2
+                )
+
+
+                # ==================================
+                # DRAW VEHICLE TRACK TRAIL
+                # ==================================
+
+                if track_id is not None:
+
+                    points = list(
+                        track_history[track_id]
+                    )
+
+                    for i in range(1, len(points)):
+
+                        cv2.line(
+                            frame,
+                            points[i - 1],
+                            points[i],
+                            (255, 255, 0),
+                            2
+                        )
+
+
+                # ==================================
+                # SAVE DETECTION INFORMATION
+                # ==================================
+
+                frame_detections.append({
+
+                    "vehicle": vehicle_name,
+
+                    "confidence": round(
+                        confidence, 3
+                    ),
+
+                    "track_id": track_id,
+
+                    "approach_stream": stream,
+
+                    "movement_direction": movement,
+
+                    "center": [
+                        center_x,
+                        center_y
+                    ],
+
+                    "bounding_box": [
+                        x1, y1, x2, y2
+                    ]
+
+                })
+
+
+        # ==========================================
+        # OVERALL TRAFFIC DENSITY
+        # ==========================================
+
+        total_vehicles = sum(
+            current_counts.values()
+        )
+
+        density = calculate_density(
+            total_vehicles
+        )
+
+        density_summary[density] += 1
+
+
+        # ==========================================
+        # STREAM-WISE ANALYSIS
+        # ==========================================
+
+        stream_analysis = {}
+
+        for stream in STREAMS:
+
+            count = current_stream_counts[stream]
+
+            stream_density = calculate_density(
+                count
             )
 
-            track_id = None
+            stream_density_summary[stream][
+                stream_density
+            ] += 1
 
-            if box.id is not None:
-                track_id = int(box.id[0])
-
-                vehicle_ids[vehicle_name].add(track_id)
-
-            # Draw bounding box
-            cv2.rectangle(
-                frame,
-                (x1, y1),
-                (x2, y2),
-                (0, 255, 0),
-                2
+            suggestion = signal_suggestion(
+                stream_density,
+                0
             )
 
-            # Vehicle label
-            label = vehicle_name
+            stream_analysis[stream] = {
 
-            if track_id is not None:
-                label += f" ID:{track_id}"
+                "vehicle_count": count,
 
-            label += f" {confidence:.2f}"
+                "density": stream_density,
+
+                "signal_suggestion": suggestion
+
+            }
+
+
+        # ==========================================
+        # DRAW INFORMATION PANEL
+        # ==========================================
+
+        information = [
+
+            "FLOWAI MULTI-DIRECTION TRAFFIC SYSTEM",
+
+            f"Total Vehicles: {total_vehicles}",
+
+            f"Overall Density: {density}",
+
+            f"North Stream: {current_stream_counts['NORTH']}",
+
+            f"South Stream: {current_stream_counts['SOUTH']}",
+
+            f"East Stream: {current_stream_counts['EAST']}",
+
+            f"West Stream: {current_stream_counts['WEST']}",
+
+            f"Unknown Stream: {current_stream_counts['UNKNOWN']}",
+
+            f"Movement NE: {current_movement_counts['NE']}",
+
+            f"Movement NW: {current_movement_counts['NW']}",
+
+            f"Movement SE: {current_movement_counts['SE']}",
+
+            f"Movement SW: {current_movement_counts['SW']}",
+
+            f"Movement N: {current_movement_counts['N']}",
+
+            f"Movement S: {current_movement_counts['S']}",
+
+            f"Movement E: {current_movement_counts['E']}",
+
+            f"Movement W: {current_movement_counts['W']}"
+
+        ]
+
+        y_position = 25
+
+        for info_text in information:
 
             cv2.putText(
                 frame,
-                label,
-                (x1, max(y1 - 10, 20)),
+                info_text,
+                (10, y_position),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
-                2
+                0.48,
+                (255, 255, 255),
+                1
             )
 
-            frame_detections.append({
-                "vehicle": vehicle_name,
-                "confidence": round(confidence, 3),
-                "track_id": track_id,
-                "bounding_box": [x1, y1, x2, y2]
-            })
+            y_position += 22
 
-    # --------------------------------
-    # DISPLAY LIVE VEHICLE COUNTS
-    # --------------------------------
 
-    y_position = 30
+        # ==========================================
+        # SAVE VIDEO FRAME
+        # ==========================================
 
-    cv2.putText(
-        frame,
-        "FLOWAI VEHICLE DETECTION",
-        (10, y_position),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
-        (0, 255, 255),
-        2
-    )
+        writer.write(frame)
 
-    y_position += 35
 
-    for vehicle, ids in vehicle_ids.items():
+        # ==========================================
+        # SAVE JSON FRAME RESULTS
+        # ==========================================
 
-        text = f"{vehicle}: {len(ids)}"
+        all_detections.append({
 
-        cv2.putText(
-            frame,
-            text,
-            (10, y_position),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 255),
-            2
-        )
+            "frame": frame_number,
 
-        y_position += 30
+            "timestamp_seconds": round(
+                frame_number / fps, 2
+            ),
 
-    # Save processed frame
-    writer.write(frame)
+            "total_vehicles": total_vehicles,
 
-    # Store JSON results
-    all_detections.append({
-        "frame": frame_number,
-        "timestamp_seconds": round(frame_number / fps, 2),
-        "detections": frame_detections
-    })
+            "vehicle_counts": current_counts,
 
-    if frame_number % 30 == 0:
-        print(
-            f"Processed {frame_number}/{total_frames} frames"
-        )
+            "traffic_density": density,
 
-# --------------------------------
-# RELEASE VIDEO RESOURCES
-# --------------------------------
+            "stream_analysis": stream_analysis,
 
-cap.release()
-writer.release()
+            "movement_counts": current_movement_counts,
 
-# --------------------------------
-# FINAL VEHICLE COUNTS
-# --------------------------------
+            "detections": frame_detections
+
+        })
+
+
+        # ==========================================
+        # PROCESSING PROGRESS
+        # ==========================================
+
+        if frame_number % 30 == 0:
+
+            print(
+                f"Processed {frame_number}/{total_frames} frames"
+            )
+
+
+finally:
+
+    cap.release()
+    writer.release()
+
+
+# ==========================================
+# FINAL UNIQUE VEHICLE COUNTS
+# ==========================================
 
 final_counts = {
+
     vehicle: len(ids)
+
     for vehicle, ids in vehicle_ids.items()
+
 }
 
-# Combined two-wheeler count
-bike_count = (
-    final_counts["Bicycle"]
-    + final_counts["Motorcycle"]
-)
+final_stream_counts = {
+
+    stream: len(ids)
+
+    for stream, ids in stream_vehicle_ids.items()
+
+}
+
+final_movement_counts = {
+
+    direction: len(ids)
+
+    for direction, ids in movement_vehicle_ids.items()
+
+}
+
+
+# ==========================================
+# FINAL REPORT
+# ==========================================
 
 final_results = {
+
     "project": "FlowAI",
+
+    "module": "Multi-Directional Vehicle Detection",
+
+    "video": VIDEO_PATH.name,
+
     "total_frames_processed": frame_number,
-    "vehicle_counts": final_counts,
-    "total_bikes": bike_count,
-    "total_vehicles": sum(final_counts.values()),
+
+    "unique_vehicle_counts": final_counts,
+
+    "total_unique_vehicles": sum(
+        final_counts.values()
+    ),
+
+    "stream_vehicle_counts": final_stream_counts,
+
+    "movement_vehicle_counts": final_movement_counts,
+
+    "density_frame_summary": density_summary,
+
+    "stream_density_summary": stream_density_summary,
+
     "detections": all_detections
+
 }
 
-# Save JSON
-with open(OUTPUT_JSON, "w") as file:
-    json.dump(final_results, file, indent=4)
 
-# --------------------------------
-# DISPLAY FINAL RESULTS
-# --------------------------------
+# ==========================================
+# SAVE JSON RESULTS
+# ==========================================
 
-print("\n================================")
-print("       FLOWAI RESULTS")
-print("================================")
+with open(
+    OUTPUT_JSON,
+    "w",
+    encoding="utf-8"
+) as file:
 
-print("Cars:", final_counts["Car"])
-print("Motorcycles:", final_counts["Motorcycle"])
-print("Bicycles:", final_counts["Bicycle"])
-print("Total Bikes:", bike_count)
-print("Buses:", final_counts["Bus"])
-print("Trucks:", final_counts["Truck"])
+    json.dump(
+        final_results,
+        file,
+        indent=4
+    )
 
-print("--------------------------------")
-print("Total Vehicles:", final_results["total_vehicles"])
+
+# ==========================================
+# FINAL OUTPUT REPORT
+# ==========================================
+
+print("\n======================================")
+
+print(" FLOWAI MULTI-DIRECTION TRAFFIC REPORT")
+
+print("======================================")
+
+print("\nTOTAL UNIQUE VEHICLE COUNTS")
+
+for vehicle, count in final_counts.items():
+
+    print(f"{vehicle}: {count}")
+
+
+print("\nFOUR APPROACH STREAM COUNTS")
+
+for stream, count in final_stream_counts.items():
+
+    print(f"{stream}: {count}")
+
+
+print("\nMOVEMENT DIRECTION COUNTS")
+
+for direction, count in final_movement_counts.items():
+
+    print(f"{direction}: {count}")
+
+
+print("\nTRAFFIC DENSITY SUMMARY")
+
+for density_name, count in density_summary.items():
+
+    print(f"{density_name}: {count}")
+
 
 print("\nDetection completed successfully!")
 
+print("Total Frames Processed:", frame_number)
+
 print("Output Video:", OUTPUT_VIDEO)
+
 print("JSON Results:", OUTPUT_JSON)
+
+print("======================================")
