@@ -22,12 +22,13 @@ OUTPUT_VIDEO = OUTPUT_DIR / "traffic_detected.mp4"
 OUTPUT_JSON = RESULT_DIR / "detections.json"
 
 # YOLO COCO vehicle class IDs
+# (COCO: 1=person 2=bicycle 3=car 4=motorcycle 5=airplane 6=bus 7=train 8=truck)
 VEHICLE_CLASSES = {
-    1: "Bicycle",
-    2: "Car",
-    3: "Motorcycle",
-    5: "Bus",
-    7: "Truck"
+    2: "Bicycle",
+    3: "Car",
+    4: "Motorcycle",
+    6: "Bus",
+    8: "Truck"
 }
 
 # Initialize counts for every category
