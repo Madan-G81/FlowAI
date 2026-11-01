@@ -1,0 +1,22 @@
+{
+    "north": {
+        "vehicle_count": 24,
+        "queue_length": 12,
+        "waiting_time_seconds": 35
+    },
+    "south": {
+        "vehicle_count": 18,
+        "queue_length": 8,
+        "waiting_time_seconds": 22
+    },
+    "east": {
+        "vehicle_count": 8,
+        "queue_length": 3,
+        "waiting_time_seconds": 10
+    },
+    "west": {
+        "vehicle_count": 4,
+        "queue_length": 2,
+        "waiting_time_seconds": 7
+    }
+}
